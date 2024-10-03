@@ -4,7 +4,8 @@ FROM golang:$GOVERSION AS builder
 WORKDIR /src
 COPY . .
 
-RUN GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o . -ldflags="-s -w -X main.release=$(git rev-parse HEAD)" ./cmd/vroom
+ARG TARGETARCH
+RUN GOOS=linux GOARCH=$TARGETARCH CGO_ENABLED=0 go build -o . -ldflags="-s -w -X main.release=$(git rev-parse HEAD)" ./cmd/vroom
 
 FROM debian:bookworm-slim
 
