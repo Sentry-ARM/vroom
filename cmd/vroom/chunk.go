@@ -17,7 +17,14 @@ import (
 
 	"github.com/getsentry/vroom/internal/chunk"
 	"github.com/getsentry/vroom/internal/metrics"
+	"github.com/getsentry/vroom/internal/platform"
 	"github.com/getsentry/vroom/internal/storageutil"
+)
+
+type (
+	chunkPlatform struct {
+		Platform platform.Platform `json:"platform"`
+	}
 )
 
 func (env *environment) postChunk(w http.ResponseWriter, r *http.Request) {
@@ -35,9 +42,26 @@ func (env *environment) postChunk(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	defer r.Body.Close()
+	r.Body.Close()
 
-	c := new(chunk.Chunk)
+	var p chunkPlatform
+	err = json.Unmarshal(body, &p)
+	if err != nil {
+		if hub != nil {
+			hub.CaptureException(err)
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	var c chunk.Chunk
+	switch p.Platform {
+	case platform.Android:
+		c = new(chunk.AndroidChunk)
+	default:
+		c = new(chunk.SampleChunk)
+	}
+
 	s = sentry.StartSpan(ctx, "json.unmarshal")
 	s.Description = "Unmarshal profile"
 	err = json.Unmarshal(body, c)
@@ -54,15 +78,15 @@ func (env *environment) postChunk(w http.ResponseWriter, r *http.Request) {
 
 	if hub != nil {
 		hub.Scope().SetContext("Profile metadata", map[string]interface{}{
-			"chunk_id":        c.ID,
-			"organization_id": strconv.FormatUint(c.OrganizationID, 10),
-			"profiler_id":     c.ProfilerID,
-			"project_id":      strconv.FormatUint(c.ProjectID, 10),
+			"chunk_id":        c.GetID(),
+			"organization_id": strconv.FormatUint(c.GetOrganizationID(), 10),
+			"profiler_id":     c.GetProfilerID(),
+			"project_id":      strconv.FormatUint(c.GetProjectID(), 10),
 			"size":            len(body),
 		})
 
 		hub.Scope().SetTags(map[string]string{
-			"platform": string(c.Platform),
+			"platform": string(c.GetPlatform()),
 		})
 	}
 
@@ -114,36 +138,72 @@ func (env *environment) postChunk(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Finish()
 
-	if c.Options.ProjectDSN != "" {
+	options := c.GetOptions()
+	sc, ok := c.(*chunk.SampleChunk)
+
+	// Metrics extraction is only supported for sample chunks right now.
+	// TODO: support metrics extraction for Android chunks.
+	if options.ProjectDSN != "" && c.GetPlatform() != platform.Android && ok {
 		// nb.: here we don't have a specific thread ID, so we're going to ingest
 		// functions metrics from all the thread.
 		// That's ok as this data is not supposed to be transaction/span scoped,
 		// plus, we'll only retain application frames, so much of the system functions
 		// chaff will be dropped.
 		s = sentry.StartSpan(ctx, "processing")
-		callTrees, err := c.CallTrees(nil)
+		callTrees, err := sc.CallTrees(nil)
 		s.Finish()
 		if err != nil {
 			hub.CaptureException(err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-
 		s = sentry.StartSpan(ctx, "processing")
 		s.Description = "Extract functions"
 		functions := metrics.ExtractFunctionsFromCallTrees(callTrees)
 		functions = metrics.CapAndFilterFunctions(functions, maxUniqueFunctionsPerProfile, true)
 		s.Finish()
 
+		// This block writes into the functions dataset
+		s = sentry.StartSpan(ctx, "json.marshal")
+		s.Description = "Marshal functions Kafka message"
+		b, err := json.Marshal(buildChunkFunctionsKafkaMessage(sc, functions))
+		s.Finish()
+		if err != nil {
+			if hub != nil {
+				hub.CaptureException(err)
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		s = sentry.StartSpan(ctx, "processing")
+		s.Description = "Send functions to Kafka"
+		err = env.profilingWriter.WriteMessages(ctx, kafka.Message{
+			Topic: env.config.CallTreesKafkaTopic,
+			Value: b,
+		})
+		s.Finish()
+		if hub != nil {
+			hub.Scope().SetContext("Call functions payload", map[string]interface{}{
+				"Size": len(b),
+			})
+		}
+		if err != nil {
+			if hub != nil {
+				hub.CaptureException(err)
+			}
+		}
+
+		// this block is writing into the generic metrics dataset
+		// TODO: remove once we fully move to functions dataset
 		s = sentry.StartSpan(ctx, "processing")
 		s.Description = "Extract metrics from functions"
-		metrics := extractMetricsFromChunkFunctions(c, functions)
+		metrics := extractMetricsFromSampleChunkFunctions(sc, functions)
 		s.Finish()
 
 		if len(metrics) > 0 {
 			s = sentry.StartSpan(ctx, "processing")
 			s.Description = "Send functions metrics to generic metrics platform"
-			sendMetrics(ctx, c.Options.ProjectDSN, metrics, env.metricsClient)
+			sendMetrics(ctx, options.ProjectDSN, metrics, env.metricsClient)
 			s.Finish()
 		}
 	}
@@ -163,7 +223,7 @@ type postProfileFromChunkIDsRequest struct {
 // This way, if we decide to later add a few more utility fields
 // (for pagination, etc.) we won't have to change the Chunk struct.
 type postProfileFromChunkIDsResponse struct {
-	Chunk chunk.Chunk `json:"chunk"`
+	Chunk chunk.SampleChunk `json:"chunk"`
 }
 
 // This is more of a GET method, but since we're receiving a list of chunk IDs as part of a
@@ -201,6 +261,7 @@ func (env *environment) postProfileFromChunkIDs(w http.ResponseWriter, r *http.R
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	r.Body.Close()
 
 	hub.Scope().SetTag("num_chunks", fmt.Sprintf("%d", len(requestBody.ChunkIDs)))
 	s = sentry.StartSpan(ctx, "chunks.read")
@@ -221,7 +282,7 @@ func (env *environment) postProfileFromChunkIDs(w http.ResponseWriter, r *http.R
 		}
 	}
 
-	chunks := make([]chunk.Chunk, 0, len(requestBody.ChunkIDs))
+	chunks := make([]chunk.SampleChunk, 0, len(requestBody.ChunkIDs))
 	// read the output of each tasks
 	for i := 0; i < len(requestBody.ChunkIDs); i++ {
 		res := <-results
@@ -265,7 +326,7 @@ func (env *environment) postProfileFromChunkIDs(w http.ResponseWriter, r *http.R
 
 	s = sentry.StartSpan(ctx, "chunks.merge")
 	s.Description = "Merge profile chunks into a single one"
-	chunk, err := chunk.MergeChunks(chunks, requestBody.Start, requestBody.End)
+	chunk, err := chunk.MergeSampleChunks(chunks, requestBody.Start, requestBody.End)
 	s.Finish()
 	if err != nil {
 		hub.CaptureException(err)
@@ -300,23 +361,28 @@ type (
 		Received      float64 `json:"received"`
 		RetentionDays int     `json:"retention_days"`
 
-		SDKName    string `json:"sdk_name"`
-		SDKVersion string `json:"sdk_version"`
+		Environment string            `json:"environment"`
+		Platform    platform.Platform `json:"platform"`
+		Release     string            `json:"release"`
+		SDKName     string            `json:"sdk_name"`
+		SDKVersion  string            `json:"sdk_version"`
 	}
 )
 
-func buildChunkKafkaMessage(c *chunk.Chunk) *ChunkKafkaMessage {
-	start, end := c.StartEndTimestamps()
+func buildChunkKafkaMessage(c chunk.Chunk) *ChunkKafkaMessage {
 	return &ChunkKafkaMessage{
-		ChunkID:        c.ID,
+		ChunkID:        c.GetID(),
 		DurationMS:     c.DurationMS(),
-		EndTimestamp:   end,
-		ProfilerID:     c.ProfilerID,
-		ProjectID:      c.ProjectID,
-		Received:       c.Received,
-		RetentionDays:  c.RetentionDays,
-		SDKName:        c.ClientSDK.Name,
-		SDKVersion:     c.ClientSDK.Version,
-		StartTimestamp: start,
+		EndTimestamp:   c.EndTimestamp(),
+		Environment:    c.GetEnvironment(),
+		Platform:       c.GetPlatform(),
+		ProfilerID:     c.GetProfilerID(),
+		ProjectID:      c.GetProjectID(),
+		Received:       c.GetReceived(),
+		Release:        c.GetRelease(),
+		RetentionDays:  c.GetRetentionDays(),
+		SDKName:        c.SDKName(),
+		SDKVersion:     c.SDKVersion(),
+		StartTimestamp: c.StartTimestamp(),
 	}
 }

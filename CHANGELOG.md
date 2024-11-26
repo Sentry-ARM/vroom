@@ -23,7 +23,11 @@
 - Add optional generation of metrics during flamegraph aggregation ([#494](https://github.com/getsentry/vroom/pull/494))
 - Ingest function metrics from profile chunks ([#495](https://github.com/getsentry/vroom/pull/495))
 - Annotate flamegraph with profile data ([#501](https://github.com/getsentry/vroom/pull/501)), ([#502](https://github.com/getsentry/vroom/pull/502)), ([#503](https://github.com/getsentry/vroom/pull/503))
-- Forward SDK info to Kafka. ([#507](https://github.com/getsentry/vroom/pull/507))
+- Forward SDK info for sample profiles to Kafka. ([#507](https://github.com/getsentry/vroom/pull/507))
+- Forward SDK info for legacy profiles to Kafka. ([#515](https://github.com/getsentry/vroom/pull/515))
+- Add more metadata fields to Chunk Kafka message. ([#518](https://github.com/getsentry/vroom/pull/518))
+- Ingest Android profile chunks. ([#521](https://github.com/getsentry/vroom/pull/521))
+- Handle profile chunks in regressed endpoint. ([#527](https://github.com/getsentry/vroom/pull/527))
 
 **Bug Fixes**:
 
@@ -42,6 +46,9 @@
 - Handle js profile normalization for react+android profiles ([#499](https://github.com/getsentry/vroom/pull/499))
 - Fix metrics example list ([#505](https://github.com/getsentry/vroom/pull/505))
 - Increase readjob channel size  ([#512](https://github.com/getsentry/vroom/pull/512))
+- Return the duration measured by the profiler. ([#516](https://github.com/getsentry/vroom/pull/516), [#517](https://github.com/getsentry/vroom/pull/517))
+- Annotate functions to the right thread. ([#523](https://github.com/getsentry/vroom/pull/523))
+- Should write the profiler id. ([#528](https://github.com/getsentry/vroom/pull/528))
 
 **Internal**:
 
@@ -103,6 +110,10 @@
 - Fix flakey test for profile examples ([#504](https://github.com/getsentry/vroom/pull/504))
 - Instrument flamegraph generation with spans ([#510](https://github.com/getsentry/vroom/pull/510)), ([#511](https://github.com/getsentry/vroom/pull/511))
 - Move calltree generation into readjob ([#514](https://github.com/getsentry/vroom/pull/514))
+- Stop writing profile examples to metrics_summary ([#519](https://github.com/getsentry/vroom/pull/519))
+- Update materialized_version for profile functions metrics ([#522](https://github.com/getsentry/vroom/pull/522))
+- Support writing functions metrics we extract from chunks into the functions dataset ([#524](https://github.com/getsentry/vroom/pull/524))
+- Keep top N samples in flamegraph. ([#526](https://github.com/getsentry/vroom/pull/526))
 
 ## 23.12.0
 

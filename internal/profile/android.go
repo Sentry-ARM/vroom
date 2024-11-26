@@ -357,16 +357,6 @@ func (p Android) CallTreesWithMaxDepth(maxDepth int) map[uint64][]*nodetree.Node
 	return treesByThreadID
 }
 
-func (p Android) DurationNS() uint64 {
-	if len(p.Events) == 0 {
-		return 0
-	}
-	buildTimestamp := p.TimestampGetter()
-	startTS := buildTimestamp(p.Events[0].Time)
-	endTS := buildTimestamp(p.Events[len(p.Events)-1].Time)
-	return endTS - startTS
-}
-
 func generateFingerprint(stack []*nodetree.Node) uint64 {
 	h := fnv.New64()
 	for _, n := range stack {
@@ -606,4 +596,15 @@ func (p Android) ActiveThreadID() uint64 {
 		}
 	}
 	return 0
+}
+
+func (p Android) GetFrameWithFingerprint(target uint32) (frame.Frame, error) {
+	for _, m := range p.Methods {
+		f := m.Frame()
+		if f.Fingerprint() == target {
+			return f, nil
+		}
+	}
+	// TODO: handle react native
+	return frame.Frame{}, frame.ErrFrameNotFound
 }

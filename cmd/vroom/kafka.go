@@ -2,34 +2,31 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"strings"
 
-	"github.com/google/uuid"
-
-	"github.com/getsentry/sentry-go"
+	"github.com/getsentry/vroom/internal/chunk"
 	"github.com/getsentry/vroom/internal/nodetree"
 	"github.com/getsentry/vroom/internal/platform"
 	"github.com/getsentry/vroom/internal/profile"
 	"github.com/segmentio/kafka-go"
 )
 
-const profilesFunctionMri = "d:profiles/function.duration@millisecond"
-
 type (
 	// FunctionsKafkaMessage is representing the struct we send to Kafka to insert functions in ClickHouse.
 	FunctionsKafkaMessage struct {
-		Environment     string                      `json:"environment,omitempty"`
-		Functions       []nodetree.CallTreeFunction `json:"functions"`
-		ID              string                      `json:"profile_id"`
-		Platform        platform.Platform           `json:"platform"`
-		ProjectID       uint64                      `json:"project_id"`
-		Received        int64                       `json:"received"`
-		Release         string                      `json:"release,omitempty"`
-		RetentionDays   int                         `json:"retention_days"`
-		Timestamp       int64                       `json:"timestamp"`
-		TransactionName string                      `json:"transaction_name"`
+		Environment            string                      `json:"environment,omitempty"`
+		Functions              []nodetree.CallTreeFunction `json:"functions"`
+		ID                     string                      `json:"profile_id"`
+		Platform               platform.Platform           `json:"platform"`
+		ProjectID              uint64                      `json:"project_id"`
+		Received               int64                       `json:"received"`
+		Release                string                      `json:"release,omitempty"`
+		RetentionDays          int                         `json:"retention_days"`
+		Timestamp              int64                       `json:"timestamp"`
+		TransactionName        string                      `json:"transaction_name"`
+		StartTimestamp         float64                     `json:"start_timestamp,omitempty"`
+		EndTimestamp           float64                     `json:"end_timestamp,omitempty"`
+		ProfilingType          string                      `json:"profiling_type,omitempty"`
+		MaterializationVersion uint8                       `json:"materialization_version"`
 	}
 
 	// ProfileKafkaMessage is representing the struct we send to Kafka to insert a profile in ClickHouse.
@@ -83,16 +80,37 @@ type (
 
 func buildFunctionsKafkaMessage(p profile.Profile, functions []nodetree.CallTreeFunction) FunctionsKafkaMessage {
 	return FunctionsKafkaMessage{
-		Environment:     p.Environment(),
-		Functions:       functions,
-		ID:              p.ID(),
-		Platform:        p.Platform(),
-		ProjectID:       p.ProjectID(),
-		Received:        p.Received().Unix(),
-		Release:         p.Release(),
-		RetentionDays:   p.RetentionDays(),
-		Timestamp:       p.Timestamp().Unix(),
-		TransactionName: p.Transaction().Name,
+		Environment:            p.Environment(),
+		Functions:              functions,
+		ID:                     p.ID(),
+		Platform:               p.Platform(),
+		ProjectID:              p.ProjectID(),
+		Received:               p.Received().Unix(),
+		Release:                p.Release(),
+		RetentionDays:          p.RetentionDays(),
+		Timestamp:              p.Timestamp().Unix(),
+		TransactionName:        p.Transaction().Name,
+		MaterializationVersion: 1,
+	}
+}
+
+// Metrics extraction is only supported for sample chunks right now.
+// TODO: support metrics extraction for Android chunks.
+func buildChunkFunctionsKafkaMessage(c *chunk.SampleChunk, functions []nodetree.CallTreeFunction) FunctionsKafkaMessage {
+	return FunctionsKafkaMessage{
+		Environment:            c.Environment,
+		Functions:              functions,
+		ID:                     c.ProfilerID,
+		Platform:               c.Platform,
+		ProjectID:              c.ProjectID,
+		Received:               int64(c.Received),
+		Release:                c.Release,
+		RetentionDays:          c.RetentionDays,
+		Timestamp:              int64(c.StartTimestamp()),
+		StartTimestamp:         c.StartTimestamp(),
+		EndTimestamp:           c.EndTimestamp(),
+		ProfilingType:          "continuous",
+		MaterializationVersion: 1,
 	}
 }
 
@@ -125,53 +143,6 @@ func buildProfileKafkaMessage(p profile.Profile) ProfileKafkaMessage {
 		VersionCode:          m.VersionCode,
 		VersionName:          m.VersionName,
 	}
-}
-
-func generateMetricSummariesKafkaMessageBatch(p *profile.Profile, metrics []sentry.Metric, metricsSummary []MetricSummary) ([]kafka.Message, error) {
-	if len(metrics) != len(metricsSummary) {
-		return nil, fmt.Errorf("len(metrics): %d - len(metrics_summary): %d", len(metrics), len(metricsSummary))
-	}
-	messages := make([]kafka.Message, 0, len(metrics))
-	for i, metric := range metrics {
-		// add profile_id to the metrics_summary tags
-		tags := metric.GetTags()
-		tags["profile_id"] = p.ID()
-		ms := MetricsSummaryKafkaMessage{
-			Count:         metricsSummary[i].Count,
-			DurationMs:    uint32(p.TransactionMetadata().TransactionEnd.UnixMilli() - p.TransactionMetadata().TransactionStart.UnixMilli()),
-			EndTimestamp:  float64(p.TransactionMetadata().TransactionEnd.Unix()),
-			Max:           metricsSummary[i].Max,
-			Min:           metricsSummary[i].Min,
-			Sum:           metricsSummary[i].Sum,
-			Mri:           profilesFunctionMri,
-			ProjectID:     p.ProjectID(),
-			Received:      p.Received().Unix(),
-			RetentionDays: p.RetentionDays(),
-			Tags:          tags,
-			TraceID:       p.Transaction().TraceID,
-			// currently we need to set this to a randomly generated span_id because
-			// the metrics_summaries dataset is defined with a ReplaceMergingTree engine
-			// and given its ORDER BY definition we would not be able to store samples
-			// with the same span_id.
-			// see: https://github.com/getsentry/snuba/blob/master/snuba/snuba_migrations/metrics_summaries/0001_metrics_summaries_create_table.py#L44-L45
-			//
-			// That's ok for our use case as we currently don't need span_id for profile function,
-			// but, once we'll recreate the table and get rid of the ReplaceMergineTree
-			// we can set it back to p.Transaction().SegmentID for the sake of consistency
-			SpanID:    strings.Replace(uuid.New().String(), "-", "", -1)[16:],
-			IsSegment: true,
-			SegmentID: p.Transaction().SegmentID,
-		}
-		b, err := json.Marshal(ms)
-		if err != nil {
-			return nil, err
-		}
-		msg := kafka.Message{
-			Value: b,
-		}
-		messages = append(messages, msg)
-	}
-	return messages, nil
 }
 
 type KafkaWriter interface {
