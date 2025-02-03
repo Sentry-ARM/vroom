@@ -7,9 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"strconv"
-	"sync"
-	"time"
 
 	"github.com/getsentry/sentry-go"
 	"github.com/getsentry/vroom/internal/chunk"
@@ -29,117 +26,11 @@ type (
 	}
 
 	CallTrees map[uint64][]*nodetree.Node
-
-	ChunkMetadata struct {
-		ProfilerID    string           `json:"profiler_id"`
-		ChunkID       string           `json:"chunk_id"`
-		SpanIntervals []utils.Interval `json:"span_intervals,omitempty"`
-	}
 )
 
 var (
 	void = struct{}{}
 )
-
-func GetFlamegraphFromProfiles(
-	ctx context.Context,
-	profilesBucket *blob.Bucket,
-	organizationID uint64,
-	projectID uint64,
-	profileIDs []string,
-	spans *[][]utils.Interval,
-	numWorkers int,
-	timeout time.Duration) (speedscope.Output, error) {
-	if numWorkers < 1 {
-		numWorkers = 1
-	}
-	var wg sync.WaitGroup
-	var flamegraphTree []*nodetree.Node
-	callTreesQueue := make(chan Pair[string, CallTrees], numWorkers)
-	profileIDsChan := make(chan Pair[string, []utils.Interval], numWorkers)
-	hub := sentry.GetHubFromContext(ctx)
-	timeoutContext, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func(
-			profIDsChan chan Pair[string, []utils.Interval],
-			callTreesQueue chan Pair[string, CallTrees],
-			ctx context.Context) {
-			defer wg.Done()
-
-			for profilePair := range profIDsChan {
-				profileID := profilePair.First
-				spans := profilePair.Second
-				var p profile.Profile
-				err := storageutil.UnmarshalCompressed(ctx, profilesBucket, profile.StoragePath(organizationID, projectID, profileID), &p)
-				if err != nil {
-					if errors.Is(err, storageutil.ErrObjectNotFound) {
-						continue
-					}
-					if errors.Is(err, context.DeadlineExceeded) {
-						return
-					}
-					hub.CaptureException(err)
-					continue
-				}
-				callTrees, err := p.CallTrees()
-				if err != nil {
-					hub.CaptureException(err)
-					continue
-				}
-				if spans != nil {
-					// span intervals here contains Unix epoch timestamp (in ns).
-					// here we replace their value with the ns elapsed since
-					// the profile.timestamps to be consistent with the sample/node
-					// 'start' and 'end'
-					relativeIntervalsFromAbsoluteTimestamp(&spans, uint64(p.Timestamp().UnixNano()))
-					sortedSpans := mergeIntervals(&spans)
-					for tid, callTree := range callTrees {
-						callTrees[tid] = sliceCallTree(&callTree, &sortedSpans)
-					}
-				}
-				callTreesQueue <- Pair[string, CallTrees]{profileID, callTrees}
-			}
-		}(profileIDsChan, callTreesQueue, timeoutContext)
-	}
-
-	go func(profIDsChan chan Pair[string, []utils.Interval], profileIDs []string, ctx context.Context) {
-		for i, profileID := range profileIDs {
-			select {
-			case <-ctx.Done():
-				close(profIDsChan)
-				return
-			default:
-				profilePair := Pair[string, []utils.Interval]{First: profileID, Second: nil}
-				if spans != nil {
-					profilePair.Second = (*spans)[i]
-				}
-				profIDsChan <- profilePair
-			}
-		}
-		close(profIDsChan)
-	}(profileIDsChan, profileIDs, timeoutContext)
-
-	go func(callTreesQueue chan Pair[string, CallTrees]) {
-		wg.Wait()
-		close(callTreesQueue)
-	}(callTreesQueue)
-
-	countProfAggregated := 0
-	for pair := range callTreesQueue {
-		profileID := pair.First
-		for _, callTree := range pair.Second {
-			addCallTreeToFlamegraph(&flamegraphTree, callTree, annotateWithProfileID(profileID))
-		}
-		countProfAggregated++
-	}
-
-	sp := toSpeedscope(ctx, flamegraphTree, 1000, projectID)
-	hub.Scope().SetTag("processed_profiles", strconv.Itoa(countProfAggregated))
-	return sp, nil
-}
 
 func getMatchingNode(nodes *[]*nodetree.Node, newNode *nodetree.Node) *nodetree.Node {
 	for _, node := range *nodes {
@@ -480,89 +371,6 @@ func (f *flamegraph) getProfilesIndices(profiles map[utils.ExampleMetadata]struc
 		}
 	}
 	return indices
-}
-
-func GetFlamegraphFromChunks(
-	ctx context.Context,
-	organizationID uint64,
-	projectID uint64,
-	storage *blob.Bucket,
-	chunksMetadata []ChunkMetadata,
-	jobs chan storageutil.ReadJob) (speedscope.Output, error) {
-	hub := sentry.GetHubFromContext(ctx)
-	results := make(chan storageutil.ReadJobResult, len(chunksMetadata))
-	defer close(results)
-
-	chunkIDToMetadata := make(map[string]ChunkMetadata)
-	for _, chunkMetadata := range chunksMetadata {
-		chunkIDToMetadata[chunkMetadata.ChunkID] = chunkMetadata
-		jobs <- chunk.ReadJob{
-			Ctx:            ctx,
-			ProfilerID:     chunkMetadata.ProfilerID,
-			ChunkID:        chunkMetadata.ChunkID,
-			OrganizationID: organizationID,
-			ProjectID:      projectID,
-			Storage:        storage,
-			Result:         results,
-		}
-	}
-
-	var flamegraphTree []*nodetree.Node
-	countChunksAggregated := 0
-	// read the output of each tasks
-	for i := 0; i < len(chunksMetadata); i++ {
-		res := <-results
-		result, ok := res.(chunk.ReadJobResult)
-		if !ok {
-			continue
-		}
-		if result.Err != nil {
-			if errors.Is(result.Err, storageutil.ErrObjectNotFound) {
-				continue
-			}
-			if errors.Is(result.Err, context.DeadlineExceeded) {
-				return speedscope.Output{}, result.Err
-			}
-			if hub != nil {
-				hub.CaptureException(result.Err)
-			}
-			continue
-		}
-		cm := chunkIDToMetadata[result.Chunk.ID]
-		for _, interval := range cm.SpanIntervals {
-			callTrees, err := result.Chunk.CallTrees(&interval.ActiveThreadID)
-			if err != nil {
-				if hub != nil {
-					hub.CaptureException(err)
-				}
-				continue
-			}
-			intervals := []utils.Interval{interval}
-
-			annotate := annotateWithProfileExample(
-				utils.NewExampleFromProfilerChunk(
-					result.Chunk.ProjectID,
-					result.Chunk.ProfilerID,
-					result.Chunk.ID,
-					result.TransactionID,
-					result.ThreadID,
-					result.Start,
-					result.End,
-				),
-			)
-			for _, callTree := range callTrees {
-				slicedTree := sliceCallTree(&callTree, &intervals)
-				addCallTreeToFlamegraph(&flamegraphTree, slicedTree, annotate)
-			}
-		}
-		countChunksAggregated++
-	}
-
-	sp := toSpeedscope(ctx, flamegraphTree, 1000, projectID)
-	if hub != nil {
-		hub.Scope().SetTag("processed_chunks", strconv.Itoa(countChunksAggregated))
-	}
-	return sp, nil
 }
 
 func GetFlamegraphFromCandidates(

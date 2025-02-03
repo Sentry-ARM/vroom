@@ -1,6 +1,7 @@
 package profile
 
 import (
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"math"
@@ -41,6 +42,7 @@ type (
 		DeobfuscationStatus string `json:"deobfuscation_status,omitempty"`
 		// for react-native apps where we have js frames turned into android methods
 		JsSymbolicated *bool `json:"symbolicated,omitempty"`
+		OrigInApp      *int8 `json:"orig_in_app,omitempty"`
 	}
 )
 
@@ -243,6 +245,62 @@ func (p *Android) FixSamplesTime() {
 	}
 }
 
+func (p *Android) AddTimeDelta(deltaNS int64) func(*AndroidEvent) error {
+	var addDeltaTimestamp func(e *AndroidEvent) error
+	timestampBuilder := p.TimestampGetter()
+	switch p.Clock {
+	case GlobalClock:
+		addDeltaTimestamp = func(e *AndroidEvent) error {
+			ts := timestampBuilder(e.Time)
+			ts, err := getTsFromDelta(ts, deltaNS)
+			if err != nil {
+				return err
+			}
+			secs := (ts / 1e9)
+			nanos := (ts % 1e9)
+			e.Time.Global.Secs = secs
+			e.Time.Global.Nanos = nanos
+			return nil
+		}
+	case CPUClock:
+		addDeltaTimestamp = func(e *AndroidEvent) error {
+			ts := timestampBuilder(e.Time)
+			ts, err := getTsFromDelta(ts, deltaNS)
+			if err != nil {
+				return err
+			}
+			secs := (ts / 1e9)
+			nanos := (ts % 1e9)
+			e.Time.Monotonic.CPU.Secs = secs
+			e.Time.Monotonic.CPU.Nanos = nanos
+			return nil
+		}
+	default:
+		addDeltaTimestamp = func(e *AndroidEvent) error {
+			ts := timestampBuilder(e.Time)
+			ts, err := getTsFromDelta(ts, deltaNS)
+			if err != nil {
+				return err
+			}
+			secs := (ts / 1e9)
+			nanos := (ts % 1e9)
+			e.Time.Monotonic.Wall.Secs = secs
+			e.Time.Monotonic.Wall.Nanos = nanos
+			return nil
+		}
+	}
+	return addDeltaTimestamp
+}
+
+func getTsFromDelta(ts uint64, deltaNS int64) (uint64, error) {
+	if deltaNS < 0 && uint64(-deltaNS) <= ts {
+		return ts - uint64(-deltaNS), nil
+	} else if deltaNS >= 0 {
+		return ts + uint64(deltaNS), nil
+	}
+	return 0, errors.New("error: cannot subtract a delta bigger than the timestamp itself")
+}
+
 // CallTrees generates call trees for a given profile.
 func (p Android) CallTrees() map[uint64][]*nodetree.Node {
 	return p.CallTreesWithMaxDepth(MaxStackDepth)
@@ -374,11 +432,20 @@ func (p *Android) NormalizeMethods(pi profileInterface) {
 
 		for j := range method.InlineFrames {
 			inlineMethod := method.InlineFrames[j]
+			if inlineMethod.Data.OrigInApp != nil {
+				continue
+			}
 
 			inApp := inlineMethod.isApplicationFrame(appIdentifier)
 			inlineMethod.InApp = &inApp
 
 			method.InlineFrames[j] = inlineMethod
+		}
+		// If a stack trace rule was applied to a given
+		// frame this should have the precedence over the
+		// appIdentifier.
+		if method.Data.OrigInApp != nil {
+			continue
 		}
 
 		inApp := method.isApplicationFrame(appIdentifier)

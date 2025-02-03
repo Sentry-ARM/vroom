@@ -28,6 +28,8 @@
 - Add more metadata fields to Chunk Kafka message. ([#518](https://github.com/getsentry/vroom/pull/518))
 - Ingest Android profile chunks. ([#521](https://github.com/getsentry/vroom/pull/521))
 - Handle profile chunks in regressed endpoint. ([#527](https://github.com/getsentry/vroom/pull/527))
+- Authentication support for Kafka connection. ([#530](https://github.com/getsentry/vroom/pull/530))
+- Add support for android chunks. ([#540](https://github.com/getsentry/vroom/pull/540))
 
 **Bug Fixes**:
 
@@ -49,6 +51,7 @@
 - Return the duration measured by the profiler. ([#516](https://github.com/getsentry/vroom/pull/516), [#517](https://github.com/getsentry/vroom/pull/517))
 - Annotate functions to the right thread. ([#523](https://github.com/getsentry/vroom/pull/523))
 - Should write the profiler id. ([#528](https://github.com/getsentry/vroom/pull/528))
+- Prioritize stack trace rule over app.identifier ([#529](https://github.com/getsentry/vroom/pull/529))
 
 **Internal**:
 
@@ -114,6 +117,16 @@
 - Update materialized_version for profile functions metrics ([#522](https://github.com/getsentry/vroom/pull/522))
 - Support writing functions metrics we extract from chunks into the functions dataset ([#524](https://github.com/getsentry/vroom/pull/524))
 - Keep top N samples in flamegraph. ([#526](https://github.com/getsentry/vroom/pull/526))
+- Add utility to merge a list of android chunks and generate a speedscope result ([#531](https://github.com/getsentry/vroom/pull/531))
+- Remove unused legacy flamegraph code path. ([#533](https://github.com/getsentry/vroom/pull/533))
+- Remove generic metrics ingestion ([#534](https://github.com/getsentry/vroom/pull/534))
+- Add android chunk calltree implementation and signature definition to the chunk interface ([#536](https://github.com/getsentry/vroom/pull/536))
+- Update sentry-go dependency to v0.29.1 ([#535](https://github.com/getsentry/vroom/pull/535))
+- Lower number of concurrent reads ([#537](https://github.com/getsentry/vroom/pull/537))
+- Remove unused metrics summary kafka writer ([#538](https://github.com/getsentry/vroom/pull/538))
+- Remove unused chunks flamegraph endpoint ([#541](https://github.com/getsentry/vroom/pull/541))
+- Pass readjob result as pointer ([#542](https://github.com/getsentry/vroom/pull/542))
+- Bump golang.org/x/crypto from 0.24.0 to 0.31.0 ([#544](https://github.com/getsentry/vroom/pull/544))
 
 ## 23.12.0
 

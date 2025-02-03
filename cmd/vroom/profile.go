@@ -86,15 +86,18 @@ func (env *environment) postProfile(w http.ResponseWriter, r *http.Request) {
 		err = storageutil.CompressedWrite(ctx, env.storage, p.StoragePath(), p)
 		s.Finish()
 		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				// This is a transient error, we'll retry
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				// These are transient errors, we'll retry.
 				w.WriteHeader(http.StatusTooManyRequests)
 			} else {
-				// These errors won't be retried
-				hub.CaptureException(err)
 				if code := gcerrors.Code(err); code == gcerrors.FailedPrecondition {
+					// This indicates a duplicate, we won't retry.
 					w.WriteHeader(http.StatusPreconditionFailed)
 				} else {
+					if hub != nil {
+						hub.CaptureException(err)
+					}
+					// These errors won't be retried.
 					w.WriteHeader(http.StatusInternalServerError)
 				}
 			}
@@ -180,21 +183,6 @@ func (env *environment) postProfile(w http.ResponseWriter, r *http.Request) {
 		})
 		if err != nil {
 			hub.CaptureException(err)
-		}
-		if p.GetOptions().ProjectDSN != "" {
-			s = sentry.StartSpan(ctx, "processing")
-			s.Description = "Extract metrics from functions"
-			// Cap and filter out system frames.
-			functionsMetricPlatform := metrics.CapAndFilterFunctions(functions, maxUniqueFunctionsPerProfile, true)
-			metrics, _ := extractMetricsFromFunctions(&p, functionsMetricPlatform)
-			s.Finish()
-
-			if len(metrics) > 0 {
-				s = sentry.StartSpan(ctx, "processing")
-				s.Description = "Send functions metrics to generic metrics platform"
-				sendMetrics(ctx, p.GetOptions().ProjectDSN, metrics, env.metricsClient)
-				s.Finish()
-			}
 		}
 	}
 

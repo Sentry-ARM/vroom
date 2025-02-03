@@ -32,13 +32,10 @@ import (
 type environment struct {
 	config ServiceConfig
 
-	occurrencesWriter   KafkaWriter
-	profilingWriter     KafkaWriter
-	metricSummaryWriter KafkaWriter
+	occurrencesWriter KafkaWriter
+	profilingWriter   KafkaWriter
 
 	storage *blob.Bucket
-
-	metricsClient *http.Client
 }
 
 var (
@@ -72,6 +69,7 @@ func newEnvironment() (*environment, error) {
 		ReadTimeout:  3 * time.Second,
 		Topic:        e.config.OccurrencesKafkaTopic,
 		WriteTimeout: 3 * time.Second,
+		Transport:    createKafkaRoundTripper(e.config),
 	}
 	e.profilingWriter = &kafka.Writer{
 		Addr:         kafka.TCP(e.config.ProfilingKafkaBrokers...),
@@ -82,24 +80,7 @@ func newEnvironment() (*environment, error) {
 		Compression:  kafka.Lz4,
 		ReadTimeout:  3 * time.Second,
 		WriteTimeout: 3 * time.Second,
-	}
-	e.metricSummaryWriter = &kafka.Writer{
-		Addr:         kafka.TCP(e.config.SpansKafkaBrokers...),
-		Async:        true,
-		Balancer:     kafka.CRC32Balancer{},
-		BatchSize:    100,
-		ReadTimeout:  3 * time.Second,
-		Topic:        e.config.MetricsSummaryKafkaTopic,
-		WriteTimeout: 3 * time.Second,
-	}
-	e.metricsClient = &http.Client{
-		Timeout: time.Second * 5,
-		Transport: &http.Transport{
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 100,
-			MaxConnsPerHost:     100,
-			IdleConnTimeout:     time.Second * 60,
-		},
+		Transport:    createKafkaRoundTripper(e.config),
 	}
 	return &e, nil
 }
@@ -114,10 +95,6 @@ func (e *environment) shutdown() {
 		sentry.CaptureException(err)
 	}
 	err = e.profilingWriter.Close()
-	if err != nil {
-		sentry.CaptureException(err)
-	}
-	err = e.metricSummaryWriter.Close()
 	if err != nil {
 		sentry.CaptureException(err)
 	}
@@ -144,16 +121,6 @@ func (e *environment) newRouter() (*httprouter.Router, error) {
 			http.MethodGet,
 			"/organizations/:organization_id/projects/:project_id/raw_profiles/:profile_id",
 			e.getRawProfile,
-		},
-		{
-			http.MethodPost,
-			"/organizations/:organization_id/projects/:project_id/flamegraph",
-			e.postFlamegraphFromProfileIDs,
-		},
-		{
-			http.MethodPost,
-			"/organizations/:organization_id/projects/:project_id/chunks-flamegraph",
-			e.postFlamegraphFromChunksMetadata,
 		},
 		{
 			http.MethodPost,
