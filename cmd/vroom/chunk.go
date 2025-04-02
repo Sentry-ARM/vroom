@@ -27,6 +27,12 @@ type (
 	}
 )
 
+const (
+	// when computing slowest functions, ignore frames/node whose depth in the callTree
+	// is less than 1 (i.e. root frames).
+	minDepth uint = 1
+)
+
 func (env *environment) postChunk(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	hub := sentry.GetHubFromContext(ctx)
@@ -153,7 +159,7 @@ func (env *environment) postChunk(w http.ResponseWriter, r *http.Request) {
 	}
 	s = sentry.StartSpan(ctx, "processing")
 	s.Description = "Extract functions"
-	functions := metrics.ExtractFunctionsFromCallTrees(callTrees)
+	functions := metrics.ExtractFunctionsFromCallTrees(callTrees, minDepth)
 	functions = metrics.CapAndFilterFunctions(functions, maxUniqueFunctionsPerProfile, true)
 	s.Finish()
 
@@ -202,7 +208,7 @@ type postProfileFromChunkIDsRequest struct {
 // This way, if we decide to later add a few more utility fields
 // (for pagination, etc.) we won't have to change the Chunk struct.
 type postProfileFromChunkIDsResponse struct {
-	Chunk chunk.SampleChunk `json:"chunk"`
+	Chunk interface{} `json:"chunk"`
 }
 
 // This is more of a GET method, but since we're receiving a list of chunk IDs as part of a
@@ -307,6 +313,7 @@ func (env *environment) postProfileFromChunkIDs(w http.ResponseWriter, r *http.R
 	s.Description = "Merge profile chunks into a single one"
 	if len(chunks) == 0 {
 		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, "error: no chunks found to merge")
 		return
 	}
 	var resp []byte
@@ -365,7 +372,7 @@ func (env *environment) postProfileFromChunkIDs(w http.ResponseWriter, r *http.R
 			return
 		}
 		s = sentry.StartSpan(ctx, "json.marshal")
-		resp, err = json.Marshal(sp)
+		resp, err = json.Marshal(postProfileFromChunkIDsResponse{Chunk: sp})
 		s.Finish()
 		if err != nil {
 			hub.CaptureException(err)

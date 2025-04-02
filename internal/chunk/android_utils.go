@@ -164,7 +164,7 @@ func SpeedscopeFromAndroidChunks(chunks []AndroidChunk, startTS, endTS uint64) (
 	}
 	chunk.Profile.Events = events
 	chunk.Profile.Methods = methods
-	chunk.DurationNS = maxTsNS
+	chunk.DurationNS = maxTsNS - startTS
 
 	s, err := chunk.Profile.Speedscope()
 	if err != nil {
@@ -172,9 +172,11 @@ func SpeedscopeFromAndroidChunks(chunks []AndroidChunk, startTS, endTS uint64) (
 	}
 	s.DurationNS = chunk.DurationNS
 	s.Metadata.Timestamp = time.Unix(0, int64(firstChunkStartTimestampNS)).UTC()
+	s.ChunkID = chunk.ID
+	s.Platform = chunk.Platform
 
 	if len(mergedMeasurement) > 0 {
-		s.MeasurementsV2 = mergedMeasurement
+		s.Measurements = mergedMeasurement
 	}
 
 	return s, nil

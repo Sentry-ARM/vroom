@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/getsentry/vroom/internal/platform"
 	"github.com/getsentry/vroom/internal/profile"
 	"github.com/getsentry/vroom/internal/speedscope"
 	"github.com/getsentry/vroom/internal/testutil"
@@ -12,6 +13,8 @@ import (
 var androidChunk1 = AndroidChunk{
 	Timestamp:  0.0,
 	DurationNS: 1500,
+	ID:         "1a009sd87",
+	Platform:   platform.Android,
 	Profile: profile.Android{
 		Clock: "Dual",
 		Events: []profile.AndroidEvent{
@@ -101,6 +104,8 @@ var androidChunk1 = AndroidChunk{
 var androidChunk2 = AndroidChunk{
 	Timestamp:  2.5e-6,
 	DurationNS: 2000,
+	ID:         "ee3409d8",
+	Platform:   platform.Android,
 	Profile: profile.Android{
 		Clock: "Dual",
 		Events: []profile.AndroidEvent{
@@ -201,6 +206,8 @@ func TestSpeedscopeFromAndroidChunks(t *testing.T) {
 			want: speedscope.Output{
 				AndroidClock: "Dual",
 				DurationNS:   4500,
+				ChunkID:      "1a009sd87",
+				Platform:     platform.Android,
 				Profiles: []any{
 					&speedscope.EventedProfile{
 						EndValue: 4500,
@@ -275,7 +282,9 @@ func TestSpeedscopeFromAndroidChunks(t *testing.T) {
 			have: []AndroidChunk{androidChunk1, androidChunk2},
 			want: speedscope.Output{
 				AndroidClock: "Dual",
-				DurationNS:   4500,
+				DurationNS:   3000,
+				ChunkID:      "1a009sd87",
+				Platform:     platform.Android,
 				Profiles: []any{
 					&speedscope.EventedProfile{
 						EndValue: 3000,

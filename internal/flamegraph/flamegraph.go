@@ -436,7 +436,13 @@ func GetFlamegraphFromCandidates(
 				continue
 			}
 			if errors.Is(err, context.DeadlineExceeded) {
-				return speedscope.Output{}, err
+				// Since we set an artificially lower timeout
+				// (10s < 15s), if we exceeded the deadline
+				// we stopped downloading chunks, but we
+				// still have time to compute the flamegraph
+				// with the chunks we downloaded so far
+				// and return it.
+				continue
 			}
 			if hub != nil {
 				hub.CaptureException(err)
@@ -457,7 +463,7 @@ func GetFlamegraphFromCandidates(
 			// if metrics aggregator is not null, while we're at it,
 			// compute the metrics as well
 			if ma != nil {
-				functions := metrics.CapAndFilterFunctions(metrics.ExtractFunctionsFromCallTrees(result.CallTrees), int(ma.MaxUniqueFunctions), true)
+				functions := metrics.CapAndFilterFunctions(metrics.ExtractFunctionsFromCallTrees(result.CallTrees, ma.MinDepth), int(ma.MaxUniqueFunctions), true)
 				ma.AddFunctions(functions, example)
 			}
 
@@ -476,9 +482,9 @@ func GetFlamegraphFromCandidates(
 				}
 
 				example := utils.NewExampleFromProfilerChunk(
-					result.Chunk.ProjectID,
-					result.Chunk.ProfilerID,
-					result.Chunk.ID,
+					result.Chunk.GetProjectID(),
+					result.Chunk.GetProfilerID(),
+					result.Chunk.GetID(),
 					result.TransactionID,
 					&threadID,
 					result.Start,
@@ -491,7 +497,7 @@ func GetFlamegraphFromCandidates(
 				// if metrics aggregator is not null, while we're at it,
 				// compute the metrics as well
 				if ma != nil {
-					functions := metrics.CapAndFilterFunctions(metrics.ExtractFunctionsFromCallTreesForThread(callTree), int(ma.MaxUniqueFunctions), true)
+					functions := metrics.CapAndFilterFunctions(metrics.ExtractFunctionsFromCallTreesForThread(callTree, ma.MinDepth), int(ma.MaxUniqueFunctions), true)
 					ma.AddFunctions(functions, example)
 				}
 			}

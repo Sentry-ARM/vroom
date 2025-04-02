@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/getsentry/sentry-go"
 	"github.com/julienschmidt/httprouter"
@@ -23,6 +25,8 @@ type (
 
 func (env *environment) postFlamegraph(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	downloadContext, cancel := context.WithTimeout(ctx, time.Second*10)
+	defer cancel()
 	hub := sentry.GetHubFromContext(ctx)
 	ps := httprouter.ParamsFromContext(ctx)
 	rawOrganizationID := ps.ByName("organization_id")
@@ -53,11 +57,11 @@ func (env *environment) postFlamegraph(w http.ResponseWriter, r *http.Request) {
 	s = sentry.StartSpan(ctx, "processing")
 	var ma *metrics.Aggregator
 	if body.GenerateMetrics {
-		agg := metrics.NewAggregator(maxUniqueFunctionsPerProfile, 5)
+		agg := metrics.NewAggregator(maxUniqueFunctionsPerProfile, 5, minDepth)
 		ma = &agg
 	}
 	speedscope, err := flamegraph.GetFlamegraphFromCandidates(
-		ctx,
+		downloadContext,
 		env.storage,
 		organizationID,
 		body.Transaction,
